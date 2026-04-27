@@ -15,10 +15,6 @@ from . import hooks
 
 CONFIG_SNIPPET = """
 # --- codex-memory start ---
-[features]
-memories = true
-codex_hooks = true
-
 [mcp_servers.codex_memory]
 command = "codex-memory"
 args = ["mcp"]
@@ -28,6 +24,20 @@ startup_timeout_sec = 10
 tool_timeout_sec = 30
 # --- codex-memory end ---
 """.strip()
+
+FEATURE_VALUES = {
+    "memories": "true",
+    "codex_hooks": "true",
+}
+
+MCP_VALUES = {
+    "command": '"codex-memory"',
+    "args": '["mcp"]',
+    "enabled": "true",
+    "required": "false",
+    "startup_timeout_sec": "10",
+    "tool_timeout_sec": "30",
+}
 
 
 PROJECT_HOOKS = {
@@ -83,12 +93,11 @@ def install(args: argparse.Namespace) -> None:
     config = home / "config.toml"
     existing = config.read_text() if config.exists() else ""
     global_config_updated = False
-    if not args.no_global_config and "codex-memory start" not in existing:
-        with config.open("a", encoding="utf-8") as f:
-            if existing and not existing.endswith("\n"):
-                f.write("\n")
-            f.write("\n" + CONFIG_SNIPPET + "\n")
-        global_config_updated = True
+    if not args.no_global_config:
+        updated = merge_codex_config(existing)
+        if updated != existing:
+            config.write_text(updated, encoding="utf-8")
+            global_config_updated = True
 
     project_hooks_path = None
     project_hooks_updated = False
@@ -210,6 +219,90 @@ def install_project_hooks(path: Path) -> bool:
         return False
     path.write_text(json.dumps(merged, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
     return True
+
+
+def merge_codex_config(existing: str) -> str:
+    text = remove_managed_block(existing)
+    text = upsert_table_values(text, "features", FEATURE_VALUES, managed=False)
+    text = upsert_table_values(text, "mcp_servers.codex_memory", MCP_VALUES, managed=True)
+    return text
+
+
+def remove_managed_block(text: str) -> str:
+    lines = text.splitlines()
+    result: list[str] = []
+    skipping = False
+    for line in lines:
+        if line.strip() == "# --- codex-memory start ---":
+            skipping = True
+            continue
+        if skipping and line.strip() == "# --- codex-memory end ---":
+            skipping = False
+            continue
+        if not skipping:
+            result.append(line)
+    return "\n".join(result).rstrip() + ("\n" if result else "")
+
+
+def upsert_table_values(text: str, table: str, values: dict[str, str], managed: bool) -> str:
+    lines = text.splitlines()
+    header_index = find_table_header(lines, table)
+    if header_index is None:
+        block = format_table_block(table, values, managed=managed)
+        prefix = "\n" if text.strip() else ""
+        return text.rstrip() + prefix + block + "\n"
+
+    end_index = find_table_end(lines, header_index)
+    section = lines[header_index + 1:end_index]
+    seen: set[str] = set()
+    new_section: list[str] = []
+    for line in section:
+        key = toml_key(line)
+        if key in values:
+            new_section.append(f"{key} = {values[key]}")
+            seen.add(key)
+        else:
+            new_section.append(line)
+    for key, value in values.items():
+        if key not in seen:
+            new_section.append(f"{key} = {value}")
+
+    merged_lines = lines[:header_index + 1] + new_section + lines[end_index:]
+    return "\n".join(merged_lines).rstrip() + "\n"
+
+
+def format_table_block(table: str, values: dict[str, str], managed: bool) -> str:
+    lines: list[str] = []
+    if managed:
+        lines.append("# --- codex-memory start ---")
+    lines.append(f"[{table}]")
+    lines.extend(f"{key} = {value}" for key, value in values.items())
+    if managed:
+        lines.append("# --- codex-memory end ---")
+    return "\n".join(lines)
+
+
+def find_table_header(lines: list[str], table: str) -> int | None:
+    target = f"[{table}]"
+    for index, line in enumerate(lines):
+        if line.strip().split("#", 1)[0].strip() == target:
+            return index
+    return None
+
+
+def find_table_end(lines: list[str], header_index: int) -> int:
+    for index in range(header_index + 1, len(lines)):
+        stripped = lines[index].strip()
+        if stripped.startswith("[") and stripped.split("#", 1)[0].strip().endswith("]"):
+            return index
+    return len(lines)
+
+
+def toml_key(line: str) -> str | None:
+    stripped = line.strip()
+    if not stripped or stripped.startswith("#") or "=" not in stripped:
+        return None
+    return stripped.split("=", 1)[0].strip()
 
 
 def load_json_object(path: Path) -> dict[str, object]:

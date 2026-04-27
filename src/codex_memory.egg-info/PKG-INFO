@@ -101,13 +101,13 @@ Prefer storing:
 
 ```bash
 codex-memory add \
-  --scope kineticflow \
+  --scope my-project \
   --type decision \
   --title "Use Postgres as the default relational database" \
-  --content "KineticFlow has migrated from MSSQL to Postgres. New persistence work should assume PostgreSQL unless explicitly stated otherwise." \
+  --content "This project uses Postgres as its default relational database. New persistence work should assume PostgreSQL unless explicitly stated otherwise." \
   --tags database postgres migration
 
-codex-memory search "postgres dapper pgvector" --scope kineticflow --limit 5
+codex-memory search "postgres dapper pgvector" --scope my-project --limit 5
 ```
 
 ## MCP tools exposed

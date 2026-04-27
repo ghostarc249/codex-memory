@@ -8,7 +8,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from codex_memory.cli import install_project_hooks
+from codex_memory.cli import install_project_hooks, merge_codex_config
 from codex_memory.store import MemoryStore
 
 
@@ -68,6 +68,55 @@ class MemoryStoreTests(unittest.TestCase):
             self.assertIn("UserPromptSubmit", data["hooks"])
             self.assertIn("PostToolUse", data["hooks"])
             self.assertIn("Stop", data["hooks"])
+
+    def test_merge_codex_config_updates_existing_features_without_duplicate_table(self) -> None:
+        existing = """
+model = "gpt-5.4"
+
+[features]
+web_search = true
+codex_hooks = false
+
+[mcp_servers.docs]
+command = "docs-server"
+""".lstrip()
+
+        merged = merge_codex_config(existing)
+
+        self.assertEqual(merged.count("[features]"), 1)
+        self.assertIn("web_search = true", merged)
+        self.assertIn("codex_hooks = true", merged)
+        self.assertIn("memories = true", merged)
+        self.assertIn("[mcp_servers.docs]", merged)
+        self.assertIn("[mcp_servers.codex_memory]", merged)
+
+    def test_merge_codex_config_removes_old_managed_block_before_merging(self) -> None:
+        existing = """
+[features]
+web_search = true
+
+# --- codex-memory start ---
+[features]
+memories = true
+codex_hooks = true
+
+[mcp_servers.codex_memory]
+command = "codex-memory"
+args = ["mcp"]
+enabled = true
+required = false
+startup_timeout_sec = 10
+tool_timeout_sec = 30
+# --- codex-memory end ---
+""".lstrip()
+
+        merged = merge_codex_config(existing)
+
+        self.assertEqual(merged.count("[features]"), 1)
+        self.assertEqual(merged.count("[mcp_servers.codex_memory]"), 1)
+        self.assertIn("web_search = true", merged)
+        self.assertIn("memories = true", merged)
+        self.assertIn("codex_hooks = true", merged)
 
 
 class HookCliTests(unittest.TestCase):

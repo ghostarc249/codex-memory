@@ -25,15 +25,21 @@ local semantic embeddings for wording drift. The default embedding provider is a
 deterministic, offline hash vectorizer, so installs stay zero-dependency and do
 not send memory content to a remote service.
 
-## Install locally with pipx
+## Install with pipx
 
-From this folder:
+After the package is published to PyPI, install it with:
+
+```bash
+pipx install codex-memory
+```
+
+For local installation from this folder:
 
 ```bash
 pipx install .
 ```
 
-Or for development:
+For editable local development:
 
 ```bash
 pipx install --editable .
@@ -125,7 +131,7 @@ memory with `codex-hook` and `auto-memory` tags.
 The scope defaults to the git root directory name. Override it per environment:
 
 ```bash
-export CODEX_MEMORY_SCOPE=kineticflow
+export CODEX_MEMORY_SCOPE=my-project
 ```
 
 Useful install options:
@@ -173,19 +179,19 @@ Prefer storing:
 
 ```bash
 codex-memory add \
-  --scope kineticflow \
+  --scope my-project \
   --type decision \
   --title "Use Postgres as the default relational database" \
-  --content "KineticFlow has migrated from MSSQL to Postgres. New persistence work should assume PostgreSQL unless explicitly stated otherwise." \
+  --content "This project uses Postgres as its default relational database. New persistence work should assume PostgreSQL unless explicitly stated otherwise." \
   --tags database postgres migration
 
-codex-memory search "postgres dapper pgvector" --scope kineticflow --limit 5
-codex-memory search "business logic should not live in endpoints" --scope kineticflow --mode semantic
-codex-memory files --scope kineticflow --limit 10 --days 7
-codex-memory checkpoints --scope kineticflow --limit 5
+codex-memory search "postgres dapper pgvector" --scope my-project --limit 5
+codex-memory search "business logic should not live in endpoints" --scope my-project --mode semantic
+codex-memory files --scope my-project --limit 10 --days 7
+codex-memory checkpoints --scope my-project --limit 5
 codex-memory show 1
 codex-memory schema-check
-codex-memory embeddings rebuild --scope kineticflow
+codex-memory embeddings rebuild --scope my-project
 ```
 
 ## MCP tools exposed
