@@ -16,9 +16,7 @@ TOOLS = [
             "properties": {
                 "query": {"type": "string"},
                 "scope": {"type": "string"},
-                "limit": {"type": "integer", "default": 10},
-                "days": {"type": "integer"},
-                "mode": {"type": "string", "enum": ["fts", "semantic", "hybrid"], "default": "hybrid"}
+                "limit": {"type": "integer", "default": 10}
             },
             "required": ["query"]
         }
@@ -46,44 +44,7 @@ TOOLS = [
             "type": "object",
             "properties": {
                 "scope": {"type": "string"},
-                "limit": {"type": "integer", "default": 20},
-                "days": {"type": "integer"},
-                "type": {"type": "string", "enum": ["decision", "constraint", "pattern", "task_context", "pitfall", "note"]}
-            }
-        }
-    },
-    {
-        "name": "memory_show",
-        "description": "Show one durable local Codex memory record by id.",
-        "inputSchema": {
-            "type": "object",
-            "properties": {
-                "id": {"type": "integer"}
-            },
-            "required": ["id"]
-        }
-    },
-    {
-        "name": "memory_files",
-        "description": "List recently touched files tracked from Codex tool use.",
-        "inputSchema": {
-            "type": "object",
-            "properties": {
-                "scope": {"type": "string"},
-                "limit": {"type": "integer", "default": 10},
-                "days": {"type": "integer"}
-            }
-        }
-    },
-    {
-        "name": "memory_checkpoints",
-        "description": "List recent task-context memories saved at turn completion.",
-        "inputSchema": {
-            "type": "object",
-            "properties": {
-                "scope": {"type": "string"},
-                "limit": {"type": "integer", "default": 5},
-                "days": {"type": "integer"}
+                "limit": {"type": "integer", "default": 20}
             }
         }
     },
@@ -105,24 +66,6 @@ TOOLS = [
             "type": "object",
             "properties": {}
         }
-    },
-    {
-        "name": "memory_schema_check",
-        "description": "Validate the durable local Codex memory database schema.",
-        "inputSchema": {
-            "type": "object",
-            "properties": {}
-        }
-    },
-    {
-        "name": "memory_embeddings_rebuild",
-        "description": "Rebuild local semantic embeddings for existing memory records.",
-        "inputSchema": {
-            "type": "object",
-            "properties": {
-                "scope": {"type": "string"}
-            }
-        }
     }
 ]
 
@@ -140,14 +83,7 @@ def make_text_result(value: Any) -> dict[str, Any]:
 
 def handle_tool_call(store: MemoryStore, name: str, arguments: dict[str, Any]) -> dict[str, Any]:
     if name == "memory_search":
-        mode = arguments.get("mode", "hybrid")
-        if mode == "semantic":
-            result = store.semantic_search(arguments["query"], arguments.get("scope"), int(arguments.get("limit", 10)), arguments.get("days"))
-        elif mode == "fts":
-            result = store.search(arguments["query"], arguments.get("scope"), int(arguments.get("limit", 10)), arguments.get("days"))
-        else:
-            result = store.hybrid_search(arguments["query"], arguments.get("scope"), int(arguments.get("limit", 10)), arguments.get("days"))
-        return make_text_result(result)
+        return make_text_result(store.search(arguments["query"], arguments.get("scope"), int(arguments.get("limit", 10))))
     if name == "memory_add":
         return make_text_result(store.add(
             scope=arguments["scope"],
@@ -158,22 +94,11 @@ def handle_tool_call(store: MemoryStore, name: str, arguments: dict[str, Any]) -
             source=arguments.get("source")
         ))
     if name == "memory_list":
-        return make_text_result(store.list(arguments.get("scope"), int(arguments.get("limit", 20)), arguments.get("days"), arguments.get("type")))
-    if name == "memory_show":
-        return make_text_result(store.get(int(arguments["id"])))
-    if name == "memory_files":
-        return make_text_result(store.list_files(arguments.get("scope"), int(arguments.get("limit", 10)), arguments.get("days")))
-    if name == "memory_checkpoints":
-        return make_text_result(store.checkpoints(arguments.get("scope"), int(arguments.get("limit", 5)), arguments.get("days")))
+        return make_text_result(store.list(arguments.get("scope"), int(arguments.get("limit", 20))))
     if name == "memory_forget":
         return make_text_result({"forgotten": store.forget(int(arguments["id"]))})
     if name == "memory_health":
         return make_text_result(store.health())
-    if name == "memory_schema_check":
-        problems = store.schema_check()
-        return make_text_result({"ok": not problems, "problems": problems})
-    if name == "memory_embeddings_rebuild":
-        return make_text_result(store.rebuild_embeddings(arguments.get("scope")))
     raise ValueError(f"Unknown tool: {name}")
 
 

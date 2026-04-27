@@ -8,6 +8,7 @@ version = "0.1.0"
 description = "Local SQLite memory MCP server for Codex"
 readme = "README.md"
 requires-python = ">=3.10"
+license = "MIT"
 authors = [{ name = "Local" }]
 dependencies = []
 

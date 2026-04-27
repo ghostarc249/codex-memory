@@ -9,3 +9,6 @@ enabled = true
 required = false
 startup_timeout_sec = 10
 tool_timeout_sec = 30
+
+# Repo-local automatic memory hooks are installed into:
+# <repo>/.codex/hooks.json

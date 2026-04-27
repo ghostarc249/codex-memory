@@ -1,0 +1,2 @@
+[console_scripts]
+codex-memory = codex_memory.cli:main
