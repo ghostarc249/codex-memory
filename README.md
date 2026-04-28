@@ -158,6 +158,26 @@ codex-memory install --no-project-hooks
 
 Project-local hooks only load when Codex trusts the project `.codex/` layer.
 
+## Publishing to PyPI
+
+This repo uses PyPI Trusted Publishing through GitHub Actions. Configure the
+`codex-memory` project on PyPI with a trusted publisher:
+
+- Owner: `ghostarc249`
+- Repository: `codex-memory`
+- Workflow: `publish.yml`
+- Environment: `pypi`
+
+Publish a release by pushing a signed version tag:
+
+```bash
+git tag -s v0.1.0 -m "Release v0.1.0"
+git push origin v0.1.0
+```
+
+The workflow builds the source distribution and wheel, then publishes them to
+PyPI using GitHub OIDC instead of a stored PyPI token.
+
 ## Project AGENTS.md policy block
 
 Add this to your repo `AGENTS.md`:
