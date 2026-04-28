@@ -13,6 +13,59 @@ from codex_memory.cli import format_health_report, install_project_hooks, merge_
 from codex_memory.store import MemoryStore
 
 
+def context_chars(output: dict[str, object]) -> int:
+    hook_output = output.get("hookSpecificOutput")
+    if not isinstance(hook_output, dict):
+        return 0
+    return len(str(hook_output.get("additionalContext") or ""))
+
+
+def legacy_eager_context_chars(store: MemoryStore, scope: str, prompt: str) -> int:
+    memories = store.hybrid_search(prompt, scope=scope, limit=5) if prompt else []
+    if not memories:
+        memories = store.list(scope=scope, limit=3)
+    files = store.list_files(scope=scope, limit=10)
+    return len(legacy_format_memory_context(scope, memories, files))
+
+
+def legacy_format_memory_context(scope: str, memories: list[dict[str, object]], files: list[dict[str, object]]) -> str:
+    lines = [
+        f"Codex Memory auto-search ran before this turn for scope `{scope}`.",
+        "Use these local memories if relevant; they may be stale, so verify drift-prone facts.",
+        "",
+    ]
+    if files:
+        lines.append("Recent files:")
+        for file in files:
+            lines.append(f"- {file['file_path']} (last tool={file.get('tool_name') or 'unknown'}, seen={file.get('seen_count', 1)})")
+        lines.append("")
+    if memories:
+        lines.append("Relevant memories:")
+    for memory in memories:
+        tags = ", ".join(memory.get("tags") or [])
+        tag_text = f" tags={tags}" if tags else ""
+        lines.append(f"- [{memory['type']}] {memory['title']} (id={memory['id']}{tag_text})")
+        lines.append(f"  {hooks.single_line(hooks.sanitize_terminal(str(memory['content'])))}")
+    return "\n".join(lines)
+
+
+def run_user_prompt_submit(db_path: Path, repo: Path, prompt: str) -> dict[str, object]:
+    env = os.environ.copy()
+    env["PYTHONPATH"] = "src"
+    env["CODEX_MEMORY_DB"] = str(db_path)
+
+    result = subprocess.run(
+        [sys.executable, "-m", "codex_memory.cli", "hook", "user-prompt-submit"],
+        cwd=Path(__file__).resolve().parents[1],
+        env=env,
+        input=json.dumps({"hook_event_name": "UserPromptSubmit", "cwd": str(repo), "prompt": prompt}),
+        text=True,
+        check=True,
+        capture_output=True,
+    )
+    return json.loads(result.stdout)
+
+
 class MemoryStoreTests(unittest.TestCase):
     def test_search_list_files_and_checkpoints(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -194,6 +247,56 @@ tool_timeout_sec = 30
         self.assertLessEqual(len(context), hooks.MAX_TOTAL_CONTEXT_CHARS)
         self.assertIn("Codex Memory auto-search", context)
 
+    def test_budget_savings_for_unrelated_prompt_are_material(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            db_path = Path(tmp) / "memory.db"
+            repo = Path(tmp) / "repo"
+            repo.mkdir()
+            store = MemoryStore(db_path)
+            for index in range(5):
+                store.add(
+                    scope="repo",
+                    type_="decision",
+                    title=f"Architecture decision {index}",
+                    content="PostgreSQL Dapper pgvector " + ("database persistence policy " * 120),
+                    tags=["database", "architecture"],
+                )
+                store.record_file("repo", f"src/module_{index}.py", "read", f"session:s turn:{index}")
+
+            old_chars = legacy_eager_context_chars(store, "repo", "what time is it")
+            output = run_user_prompt_submit(db_path, repo, "what time is it")
+
+            self.assertGreater(old_chars, 1000)
+            self.assertEqual(context_chars(output), 0)
+
+    def test_budget_for_relevant_prompt_keeps_signal_while_capping_context(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            db_path = Path(tmp) / "memory.db"
+            repo = Path(tmp) / "repo"
+            repo.mkdir()
+            store = MemoryStore(db_path)
+            for index in range(8):
+                store.add(
+                    scope="repo",
+                    type_="decision",
+                    title=f"Postgres decision {index}",
+                    content="PostgreSQL Dapper pgvector " + ("relevant database migration detail " * 180),
+                    tags=["database"],
+                )
+                store.record_file("repo", f"src/db_{index}.py", "read", f"session:s turn:{index}")
+
+            old_chars = legacy_eager_context_chars(store, "repo", "postgres dapper pgvector")
+            output = run_user_prompt_submit(db_path, repo, "postgres dapper pgvector")
+            new_chars = context_chars(output)
+            context = output["hookSpecificOutput"]["additionalContext"]
+
+            self.assertGreater(old_chars, hooks.MAX_TOTAL_CONTEXT_CHARS)
+            self.assertGreater(new_chars, 0)
+            self.assertLessEqual(new_chars, hooks.MAX_TOTAL_CONTEXT_CHARS)
+            self.assertLess(new_chars, old_chars)
+            self.assertIn("Postgres decision", context)
+            self.assertIn("src/db_", context)
+
     def test_retry_retries_locked_operations(self) -> None:
         attempts = {"count": 0}
 
@@ -298,21 +401,7 @@ class HookCliTests(unittest.TestCase):
                 content="Use PostgreSQL with Dapper and pgvector for persistence.",
                 tags=["database"],
             )
-            env = os.environ.copy()
-            env["PYTHONPATH"] = "src"
-            env["CODEX_MEMORY_DB"] = str(db_path)
-
-            result = subprocess.run(
-                [sys.executable, "-m", "codex_memory.cli", "hook", "user-prompt-submit"],
-                cwd=Path(__file__).resolve().parents[1],
-                env=env,
-                input=json.dumps({"hook_event_name": "UserPromptSubmit", "cwd": str(repo), "prompt": "what time is it"}),
-                text=True,
-                check=True,
-                capture_output=True,
-            )
-
-            self.assertEqual(json.loads(result.stdout), {"continue": True})
+            self.assertEqual(run_user_prompt_submit(db_path, repo, "what time is it"), {"continue": True})
 
     def test_stop_hook_writes_structured_checkpoint(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
