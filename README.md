@@ -1,6 +1,8 @@
 # Codex Memory Kit
 
-A minimal, local-first Codex memory setup inspired by `auto-memory`, but designed for Codex:
+A minimal, local-first Codex memory setup inspired by
+[`auto-memory`](https://github.com/dezgit2025/auto-memory), but designed for
+Codex:
 
 - SQLite + FTS5 durable memory store
 - MCP stdio server exposing memory tools
@@ -24,6 +26,14 @@ Search is hybrid by default: SQLite FTS5 for exact/project terminology plus
 local semantic embeddings for wording drift. The default embedding provider is a
 deterministic, offline hash vectorizer, so installs stay zero-dependency and do
 not send memory content to a remote service.
+
+## Acknowledgements
+
+`codex-memory` was inspired by
+[`auto-memory`](https://github.com/dezgit2025/auto-memory), created by
+[`dezgit2025`](https://github.com/dezgit2025). `auto-memory` brought automatic
+memory workflows to GitHub Copilot; this package adapts that idea for a
+Codex-native surface.
 
 ## Install with pipx
 
