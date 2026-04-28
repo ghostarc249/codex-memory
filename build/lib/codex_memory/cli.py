@@ -172,6 +172,49 @@ def embeddings(args: argparse.Namespace) -> None:
     print_json(MemoryStore().rebuild_embeddings(scope=args.scope))
 
 
+def doctor(args: argparse.Namespace) -> None:
+    repo_root = resolve_install_root(args.repo)
+    scope = args.scope or repo_root.name
+    home = codex_home()
+    config = home / "config.toml"
+    config_text = config.read_text(encoding="utf-8") if config.exists() else ""
+    merged_config = merge_codex_config(config_text)
+    hooks_path = repo_root / ".codex" / "hooks.json"
+    hooks_ok = False
+    hook_problems: list[str] = []
+    if hooks_path.exists():
+        try:
+            hooks_data = load_json_object(hooks_path)
+            hooks_ok, hook_problems = validate_project_hooks(hooks_data)
+        except SystemExit as exc:
+            hook_problems.append(str(exc))
+    else:
+        hook_problems.append(f"Missing project hooks file: {hooks_path}")
+
+    store = MemoryStore()
+    health_result = store.health()
+    roundtrip = run_doctor_roundtrip(store, scope) if args.roundtrip else {"skipped": True}
+    result = {
+        "ok": merged_config == config_text and hooks_ok and health_result["ok"] and bool(roundtrip.get("ok", True)),
+        "scope": scope,
+        "config": {
+            "path": str(config),
+            "exists": config.exists(),
+            "up_to_date": merged_config == config_text,
+        },
+        "hooks": {
+            "path": str(hooks_path),
+            "ok": hooks_ok,
+            "problems": hook_problems,
+        },
+        "database": health_result,
+        "roundtrip": roundtrip,
+    }
+    print_json(result)
+    if not result["ok"]:
+        raise SystemExit(2)
+
+
 def forget(args: argparse.Namespace) -> None:
     print_json({"forgotten": MemoryStore().forget(args.id)})
 
@@ -354,6 +397,45 @@ def group_commands(group: dict[str, object]) -> set[str]:
     return commands
 
 
+def validate_project_hooks(hooks_data: dict[str, object]) -> tuple[bool, list[str]]:
+    problems: list[str] = []
+    hooks_value = hooks_data.get("hooks")
+    if not isinstance(hooks_value, dict):
+        return False, ["hooks.json does not contain a `hooks` object"]
+    required = {
+        "UserPromptSubmit": "codex-memory hook user-prompt-submit",
+        "PostToolUse": "codex-memory hook post-tool-use",
+        "Stop": "codex-memory hook stop",
+    }
+    for event_name, command in required.items():
+        groups = hooks_value.get(event_name)
+        if not isinstance(groups, list):
+            problems.append(f"Missing hooks.{event_name}")
+            continue
+        if not any(command in group_commands(group) for group in groups if isinstance(group, dict)):
+            problems.append(f"Missing command for {event_name}: {command}")
+    return not problems, problems
+
+
+def run_doctor_roundtrip(store: MemoryStore, scope: str) -> dict[str, object]:
+    marker = f"doctor-roundtrip-{int(time.time() * 1000)}"
+    memory = store.add(
+        scope=scope,
+        type_="task_context",
+        title="Codex memory doctor roundtrip",
+        content=f"Checkpoint summary:\n- Outcome: {marker}\n- Next step: Verify automatic recall.",
+        tags=["doctor", "checkpoint"],
+        source=marker,
+    )
+    results = store.hybrid_search(marker, scope=scope, limit=3)
+    return {
+        "ok": any(result["id"] == memory["id"] for result in results),
+        "memory_id": memory["id"],
+        "query": marker,
+        "results": [result["id"] for result in results],
+    }
+
+
 def main(argv: list[str] | None = None) -> None:
     started = time.monotonic()
     parser = argparse.ArgumentParser(prog="codex-memory")
@@ -415,6 +497,12 @@ def main(argv: list[str] | None = None) -> None:
     p.add_argument("action", choices=["rebuild"])
     p.add_argument("--scope")
     p.set_defaults(func=embeddings)
+
+    p = sub.add_parser("doctor")
+    p.add_argument("--repo", help="Repository path to inspect. Defaults to the current working directory.")
+    p.add_argument("--scope", help="Memory scope to use for the optional roundtrip. Defaults to the repo root name.")
+    p.add_argument("--no-roundtrip", action="store_false", dest="roundtrip", help="Skip the write/search roundtrip probe.")
+    p.set_defaults(func=doctor, roundtrip=True)
 
     p = sub.add_parser("forget")
     p.add_argument("id", type=int)

@@ -12,6 +12,7 @@ from .embeddings import DEFAULT_EMBEDDING_DIMENSIONS, DEFAULT_EMBEDDING_PROVIDER
 
 VALID_TYPES = {"decision", "constraint", "pattern", "task_context", "pitfall", "note"}
 SCHEMA_VERSION = 3
+SQLITE_RETRY_DELAYS_SECONDS = [0.05, 0.15, 0.45, 1.0]
 
 
 def codex_home() -> Path:
@@ -48,109 +49,116 @@ class MemoryStore:
         return conn
 
     def _init_db(self) -> None:
-        with self.connect() as conn:
-            conn.execute("PRAGMA journal_mode=WAL;")
-            conn.execute("""
-                CREATE TABLE IF NOT EXISTS metadata (
-                    key TEXT PRIMARY KEY,
-                    value TEXT NOT NULL
-                );
-            """)
-            conn.execute("""
-                CREATE TABLE IF NOT EXISTS memories (
-                    id INTEGER PRIMARY KEY AUTOINCREMENT,
-                    scope TEXT NOT NULL,
-                    type TEXT NOT NULL,
-                    title TEXT NOT NULL,
-                    content TEXT NOT NULL,
-                    tags TEXT NOT NULL DEFAULT '[]',
-                    source TEXT,
-                    created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
-                    updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
-                );
-            """)
-            conn.execute("""
-                CREATE TABLE IF NOT EXISTS memory_files (
-                    id INTEGER PRIMARY KEY AUTOINCREMENT,
-                    scope TEXT NOT NULL,
-                    file_path TEXT NOT NULL,
-                    tool_name TEXT,
-                    source TEXT,
-                    first_seen_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
-                    last_seen_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
-                    seen_count INTEGER NOT NULL DEFAULT 1,
-                    UNIQUE(scope, file_path)
-                );
-            """)
-            conn.execute("""
-                CREATE TABLE IF NOT EXISTS invocations (
-                    id INTEGER PRIMARY KEY AUTOINCREMENT,
-                    command TEXT NOT NULL,
-                    duration_ms INTEGER NOT NULL,
-                    exit_code INTEGER NOT NULL,
-                    scope TEXT,
-                    rows_returned INTEGER NOT NULL DEFAULT 0,
-                    created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
-                );
-            """)
-            conn.execute("""
-                CREATE TABLE IF NOT EXISTS memory_embeddings (
-                    memory_id INTEGER PRIMARY KEY,
-                    provider TEXT NOT NULL,
-                    dimensions INTEGER NOT NULL,
-                    vector TEXT NOT NULL,
-                    updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
-                    FOREIGN KEY(memory_id) REFERENCES memories(id) ON DELETE CASCADE
-                );
-            """)
-            conn.execute("""
-                CREATE VIRTUAL TABLE IF NOT EXISTS memories_fts USING fts5(
-                    title,
-                    content,
-                    tags,
-                    content='memories',
-                    content_rowid='id'
-                );
-            """)
-            conn.executescript("""
-                CREATE TRIGGER IF NOT EXISTS memories_ai AFTER INSERT ON memories BEGIN
-                    INSERT INTO memories_fts(rowid, title, content, tags)
-                    VALUES (new.id, new.title, new.content, new.tags);
-                END;
+        def op() -> None:
+            with self.connect() as conn:
+                conn.execute("PRAGMA journal_mode=WAL;")
+                conn.execute("""
+                    CREATE TABLE IF NOT EXISTS metadata (
+                        key TEXT PRIMARY KEY,
+                        value TEXT NOT NULL
+                    );
+                """)
+                conn.execute("""
+                    CREATE TABLE IF NOT EXISTS memories (
+                        id INTEGER PRIMARY KEY AUTOINCREMENT,
+                        scope TEXT NOT NULL,
+                        type TEXT NOT NULL,
+                        title TEXT NOT NULL,
+                        content TEXT NOT NULL,
+                        tags TEXT NOT NULL DEFAULT '[]',
+                        source TEXT,
+                        created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                        updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+                    );
+                """)
+                conn.execute("""
+                    CREATE TABLE IF NOT EXISTS memory_files (
+                        id INTEGER PRIMARY KEY AUTOINCREMENT,
+                        scope TEXT NOT NULL,
+                        file_path TEXT NOT NULL,
+                        tool_name TEXT,
+                        source TEXT,
+                        first_seen_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                        last_seen_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                        seen_count INTEGER NOT NULL DEFAULT 1,
+                        UNIQUE(scope, file_path)
+                    );
+                """)
+                conn.execute("""
+                    CREATE TABLE IF NOT EXISTS invocations (
+                        id INTEGER PRIMARY KEY AUTOINCREMENT,
+                        command TEXT NOT NULL,
+                        duration_ms INTEGER NOT NULL,
+                        exit_code INTEGER NOT NULL,
+                        scope TEXT,
+                        rows_returned INTEGER NOT NULL DEFAULT 0,
+                        created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+                    );
+                """)
+                conn.execute("""
+                    CREATE TABLE IF NOT EXISTS memory_embeddings (
+                        memory_id INTEGER PRIMARY KEY,
+                        provider TEXT NOT NULL,
+                        dimensions INTEGER NOT NULL,
+                        vector TEXT NOT NULL,
+                        updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                        FOREIGN KEY(memory_id) REFERENCES memories(id) ON DELETE CASCADE
+                    );
+                """)
+                conn.execute("""
+                    CREATE VIRTUAL TABLE IF NOT EXISTS memories_fts USING fts5(
+                        title,
+                        content,
+                        tags,
+                        content='memories',
+                        content_rowid='id'
+                    );
+                """)
+                conn.executescript("""
+                    CREATE TRIGGER IF NOT EXISTS memories_ai AFTER INSERT ON memories BEGIN
+                        INSERT INTO memories_fts(rowid, title, content, tags)
+                        VALUES (new.id, new.title, new.content, new.tags);
+                    END;
 
-                CREATE TRIGGER IF NOT EXISTS memories_ad AFTER DELETE ON memories BEGIN
-                    INSERT INTO memories_fts(memories_fts, rowid, title, content, tags)
-                    VALUES('delete', old.id, old.title, old.content, old.tags);
-                END;
+                    CREATE TRIGGER IF NOT EXISTS memories_ad AFTER DELETE ON memories BEGIN
+                        INSERT INTO memories_fts(memories_fts, rowid, title, content, tags)
+                        VALUES('delete', old.id, old.title, old.content, old.tags);
+                    END;
 
-                CREATE TRIGGER IF NOT EXISTS memories_au AFTER UPDATE ON memories BEGIN
-                    INSERT INTO memories_fts(memories_fts, rowid, title, content, tags)
-                    VALUES('delete', old.id, old.title, old.content, old.tags);
-                    INSERT INTO memories_fts(rowid, title, content, tags)
-                    VALUES (new.id, new.title, new.content, new.tags);
-                END;
-            """)
-            conn.execute(
-                """
-                INSERT INTO metadata(key, value) VALUES ('schema_version', ?)
-                ON CONFLICT(key) DO UPDATE SET value = excluded.value
-                """,
-                (str(SCHEMA_VERSION),),
-            )
+                    CREATE TRIGGER IF NOT EXISTS memories_au AFTER UPDATE ON memories BEGIN
+                        INSERT INTO memories_fts(memories_fts, rowid, title, content, tags)
+                        VALUES('delete', old.id, old.title, old.content, old.tags);
+                        INSERT INTO memories_fts(rowid, title, content, tags)
+                        VALUES (new.id, new.title, new.content, new.tags);
+                    END;
+                """)
+                conn.execute(
+                    """
+                    INSERT INTO metadata(key, value) VALUES ('schema_version', ?)
+                    ON CONFLICT(key) DO UPDATE SET value = excluded.value
+                    """,
+                    (str(SCHEMA_VERSION),),
+                )
+
+        self._retry(op)
 
     def add(self, scope: str, type_: str, title: str, content: str, tags: list[str] | None = None, source: str | None = None) -> dict[str, Any]:
         if type_ not in VALID_TYPES:
             raise ValueError(f"Invalid memory type: {type_}. Valid types: {sorted(VALID_TYPES)}")
-        with self.connect() as conn:
-            cur = conn.execute(
-                """
-                INSERT INTO memories(scope, type, title, content, tags, source)
-                VALUES (?, ?, ?, ?, ?, ?)
-                """,
-                (scope, type_, title, content, json.dumps(tags or []), source),
-            )
-            row_id = int(cur.lastrowid)
-            self._upsert_embedding(conn, row_id, title, content, tags or [])
+        def op() -> int:
+            with self.connect() as conn:
+                cur = conn.execute(
+                    """
+                    INSERT INTO memories(scope, type, title, content, tags, source)
+                    VALUES (?, ?, ?, ?, ?, ?)
+                    """,
+                    (scope, type_, title, content, json.dumps(tags or []), source),
+                )
+                row_id = int(cur.lastrowid)
+                self._upsert_embedding(conn, row_id, title, content, tags or [])
+                return row_id
+
+        row_id = self._retry(op)
         return self.get(row_id)
 
     def get(self, id_: int) -> dict[str, Any]:
@@ -246,21 +254,24 @@ class MemoryStore:
 
     def forget(self, id_: int) -> dict[str, Any]:
         existing = self.get(id_)
-        with self.connect() as conn:
-            conn.execute("DELETE FROM memories WHERE id = ?", (id_,))
+        self._retry(lambda: self._delete_memory(id_))
         return existing
 
     def rebuild_embeddings(self, scope: str | None = None) -> dict[str, Any]:
         where, params = self._memory_filters(scope=scope)
-        with self.connect() as conn:
-            rows = conn.execute(f"SELECT * FROM memories {where}", params).fetchall()
-            for row in rows:
-                tags = json.loads(row["tags"] or "[]")
-                self._upsert_embedding(conn, int(row["id"]), row["title"], row["content"], tags)
+        def op() -> int:
+            with self.connect() as conn:
+                rows = conn.execute(f"SELECT * FROM memories {where}", params).fetchall()
+                for row in rows:
+                    tags = json.loads(row["tags"] or "[]")
+                    self._upsert_embedding(conn, int(row["id"]), row["title"], row["content"], tags)
+                return len(rows)
+
+        rebuilt = self._retry(op)
         return {
             "ok": True,
             "scope": scope,
-            "rebuilt": len(rows),
+            "rebuilt": rebuilt,
             "provider": DEFAULT_EMBEDDING_PROVIDER,
             "dimensions": DEFAULT_EMBEDDING_DIMENSIONS,
         }
@@ -269,24 +280,26 @@ class MemoryStore:
         normalized = file_path.strip()
         if not normalized:
             raise ValueError("file_path is required")
-        with self.connect() as conn:
-            conn.execute(
-                """
-                INSERT INTO memory_files(scope, file_path, tool_name, source)
-                VALUES (?, ?, ?, ?)
-                ON CONFLICT(scope, file_path) DO UPDATE SET
-                    tool_name = excluded.tool_name,
-                    source = COALESCE(excluded.source, memory_files.source),
-                    last_seen_at = CURRENT_TIMESTAMP,
-                    seen_count = memory_files.seen_count + 1
-                """,
-                (scope, normalized, tool_name, source),
-            )
-            row = conn.execute(
-                "SELECT * FROM memory_files WHERE scope = ? AND file_path = ?",
-                (scope, normalized),
-            ).fetchone()
-        return self._file_row_to_dict(row)
+        def op() -> dict[str, Any]:
+            with self.connect() as conn:
+                conn.execute(
+                    """
+                    INSERT INTO memory_files(scope, file_path, tool_name, source)
+                    VALUES (?, ?, ?, ?)
+                    ON CONFLICT(scope, file_path) DO UPDATE SET
+                        tool_name = excluded.tool_name,
+                        source = COALESCE(excluded.source, memory_files.source),
+                        last_seen_at = CURRENT_TIMESTAMP,
+                        seen_count = memory_files.seen_count + 1
+                    """,
+                    (scope, normalized, tool_name, source),
+                )
+                row = conn.execute(
+                    "SELECT * FROM memory_files WHERE scope = ? AND file_path = ?",
+                    (scope, normalized),
+                ).fetchone()
+                return self._file_row_to_dict(row)
+        return self._retry(op)
 
     def list_files(self, scope: str | None = None, limit: int = 10, days: int | None = None) -> list[dict[str, Any]]:
         where_parts: list[str] = []
@@ -311,19 +324,7 @@ class MemoryStore:
 
     def record_invocation(self, command: str, duration_ms: int, exit_code: int = 0, scope: str | None = None, rows_returned: int = 0) -> None:
         try:
-            with self.connect() as conn:
-                conn.execute(
-                    """
-                    INSERT INTO invocations(command, duration_ms, exit_code, scope, rows_returned)
-                    VALUES (?, ?, ?, ?, ?)
-                    """,
-                    (command, duration_ms, exit_code, scope, rows_returned),
-                )
-                stale_id = conn.execute(
-                    "SELECT id FROM invocations ORDER BY id DESC LIMIT 1 OFFSET 500"
-                ).fetchone()
-                if stale_id:
-                    conn.execute("DELETE FROM invocations WHERE id <= ?", (stale_id["id"],))
+            self._retry(lambda: self._record_invocation(command, duration_ms, exit_code, scope, rows_returned))
         except Exception:
             pass
 
@@ -420,6 +421,48 @@ class MemoryStore:
     def _fts_query(query: str) -> str:
         tokens = [t.replace('"', '""') for t in query.split() if t.strip()]
         return " AND ".join(f'"{t}"' for t in tokens)
+
+    def _delete_memory(self, id_: int) -> None:
+        with self.connect() as conn:
+            conn.execute("DELETE FROM memories WHERE id = ?", (id_,))
+
+    def _record_invocation(self, command: str, duration_ms: int, exit_code: int, scope: str | None, rows_returned: int) -> None:
+        with self.connect() as conn:
+            conn.execute(
+                """
+                INSERT INTO invocations(command, duration_ms, exit_code, scope, rows_returned)
+                VALUES (?, ?, ?, ?, ?)
+                """,
+                (command, duration_ms, exit_code, scope, rows_returned),
+            )
+            stale_id = conn.execute(
+                "SELECT id FROM invocations ORDER BY id DESC LIMIT 1 OFFSET 500"
+            ).fetchone()
+            if stale_id:
+                conn.execute("DELETE FROM invocations WHERE id <= ?", (stale_id["id"],))
+
+    @staticmethod
+    def _retry(operation: Any) -> Any:
+        last_error: sqlite3.OperationalError | None = None
+        for attempt, delay in enumerate([0.0, *SQLITE_RETRY_DELAYS_SECONDS]):
+            if delay:
+                time.sleep(delay)
+            try:
+                return operation()
+            except sqlite3.OperationalError as exc:
+                if not MemoryStore._is_lock_error(exc):
+                    raise
+                last_error = exc
+                if attempt == len(SQLITE_RETRY_DELAYS_SECONDS):
+                    raise
+        if last_error:
+            raise last_error
+        raise RuntimeError("SQLite retry failed without an error")
+
+    @staticmethod
+    def _is_lock_error(exc: sqlite3.OperationalError) -> bool:
+        message = str(exc).lower()
+        return "locked" in message or "busy" in message
 
     @staticmethod
     def _upsert_embedding(conn: sqlite3.Connection, memory_id: int, title: str, content: str, tags: list[str]) -> None:

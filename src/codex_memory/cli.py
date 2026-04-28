@@ -119,7 +119,11 @@ def install(args: argparse.Namespace) -> None:
 
 
 def health(args: argparse.Namespace) -> None:
-    print_json(MemoryStore().health())
+    result = MemoryStore().health()
+    if args.json:
+        print_json(result)
+        return
+    print(format_health_report(result))
 
 
 def schema_check(args: argparse.Namespace) -> None:
@@ -170,6 +174,49 @@ def checkpoints(args: argparse.Namespace) -> None:
 
 def embeddings(args: argparse.Namespace) -> None:
     print_json(MemoryStore().rebuild_embeddings(scope=args.scope))
+
+
+def doctor(args: argparse.Namespace) -> None:
+    repo_root = resolve_install_root(args.repo)
+    scope = args.scope or repo_root.name
+    home = codex_home()
+    config = home / "config.toml"
+    config_text = config.read_text(encoding="utf-8") if config.exists() else ""
+    merged_config = merge_codex_config(config_text)
+    hooks_path = repo_root / ".codex" / "hooks.json"
+    hooks_ok = False
+    hook_problems: list[str] = []
+    if hooks_path.exists():
+        try:
+            hooks_data = load_json_object(hooks_path)
+            hooks_ok, hook_problems = validate_project_hooks(hooks_data)
+        except SystemExit as exc:
+            hook_problems.append(str(exc))
+    else:
+        hook_problems.append(f"Missing project hooks file: {hooks_path}")
+
+    store = MemoryStore()
+    health_result = store.health()
+    roundtrip = run_doctor_roundtrip(store, scope) if args.roundtrip else {"skipped": True}
+    result = {
+        "ok": merged_config == config_text and hooks_ok and health_result["ok"] and bool(roundtrip.get("ok", True)),
+        "scope": scope,
+        "config": {
+            "path": str(config),
+            "exists": config.exists(),
+            "up_to_date": merged_config == config_text,
+        },
+        "hooks": {
+            "path": str(hooks_path),
+            "ok": hooks_ok,
+            "problems": hook_problems,
+        },
+        "database": health_result,
+        "roundtrip": roundtrip,
+    }
+    print_json(result)
+    if not result["ok"]:
+        raise SystemExit(2)
 
 
 def forget(args: argparse.Namespace) -> None:
@@ -354,6 +401,141 @@ def group_commands(group: dict[str, object]) -> set[str]:
     return commands
 
 
+def validate_project_hooks(hooks_data: dict[str, object]) -> tuple[bool, list[str]]:
+    problems: list[str] = []
+    hooks_value = hooks_data.get("hooks")
+    if not isinstance(hooks_value, dict):
+        return False, ["hooks.json does not contain a `hooks` object"]
+    required = {
+        "UserPromptSubmit": "codex-memory hook user-prompt-submit",
+        "PostToolUse": "codex-memory hook post-tool-use",
+        "Stop": "codex-memory hook stop",
+    }
+    for event_name, command in required.items():
+        groups = hooks_value.get(event_name)
+        if not isinstance(groups, list):
+            problems.append(f"Missing hooks.{event_name}")
+            continue
+        if not any(command in group_commands(group) for group in groups if isinstance(group, dict)):
+            problems.append(f"Missing command for {event_name}: {command}")
+    return not problems, problems
+
+
+def run_doctor_roundtrip(store: MemoryStore, scope: str) -> dict[str, object]:
+    marker = f"doctor-roundtrip-{int(time.time() * 1000)}"
+    memory = store.add(
+        scope=scope,
+        type_="task_context",
+        title="Codex memory doctor roundtrip",
+        content=f"Checkpoint summary:\n- Outcome: {marker}\n- Next step: Verify automatic recall.",
+        tags=["doctor", "checkpoint"],
+        source=marker,
+    )
+    results = store.hybrid_search(marker, scope=scope, limit=3)
+    return {
+        "ok": any(result["id"] == memory["id"] for result in results),
+        "memory_id": memory["id"],
+        "query": marker,
+        "results": [result["id"] for result in results],
+    }
+
+
+def format_health_report(result: dict[str, object]) -> str:
+    dimensions = [d for d in result.get("dimensions", []) if isinstance(d, dict)]
+    rows = [
+        (
+            str(index),
+            health_dimension_name(str(dimension.get("name", ""))),
+            health_zone_label(str(dimension.get("zone", ""))),
+            health_score_label(dimension.get("score")),
+            str(dimension.get("detail", "")),
+        )
+        for index, dimension in enumerate(dimensions, start=1)
+    ]
+
+    headers = ("Dim", "Name", "Zone", "Score", "Detail")
+    widths = [
+        max(len(headers[0]), *(len(row[0]) for row in rows)) if rows else len(headers[0]),
+        max(len(headers[1]), *(len(row[1]) for row in rows)) if rows else len(headers[1]),
+        max(len(headers[2]), *(display_width(row[2]) for row in rows)) if rows else len(headers[2]),
+        max(len(headers[3]), *(len(row[3]) for row in rows)) if rows else len(headers[3]),
+    ]
+    detail_width = max(len(headers[4]), *(len(row[4]) for row in rows)) if rows else len(headers[4])
+    separator = "-" * (sum(widths) + detail_width + 8)
+
+    lines = [
+        f"{headers[0]:<{widths[0]}}  {headers[1]:<{widths[1]}}  {headers[2]:<{widths[2]}}  {headers[3]:>{widths[3]}}  {headers[4]}",
+        separator,
+    ]
+    for dim, name, zone, score, detail in rows:
+        lines.append(
+            f"{dim:>{widths[0]}}  {name:<{widths[1]}}  {pad_display(zone, widths[2])}  {score:>{widths[3]}}  {detail}"
+        )
+    lines.extend([
+        separator,
+        f"   {'Overall':<{widths[1]}}  {'':<{widths[2]}}  {health_overall_score(dimensions):>{widths[3]}}",
+    ])
+
+    hints = health_hints(result, dimensions)
+    if hints:
+        lines.extend(["", "Hints:"])
+        lines.extend(f"  - {hint}" for hint in hints)
+    return "\n".join(lines)
+
+
+def health_dimension_name(name: str) -> str:
+    overrides = {
+        "fts_integrity": "FTS Integrity",
+    }
+    return overrides.get(name, name.replace("_", " ").title())
+
+
+def health_zone_label(zone: str) -> str:
+    normalized = zone.upper()
+    display = "AMBER" if normalized == "YELLOW" else normalized or "UNKNOWN"
+    icons = {
+        "GREEN": "🟢",
+        "YELLOW": "🟡",
+        "AMBER": "🟡",
+        "RED": "🔴",
+        "CALIBRATING": "⚪",
+        "UNKNOWN": "⚪",
+    }
+    return f"{icons.get(normalized, icons['UNKNOWN'])} {display}"
+
+
+def health_score_label(score: object) -> str:
+    if isinstance(score, int | float):
+        return f"{float(score):.1f}"
+    return "-"
+
+
+def health_overall_score(dimensions: list[dict[str, object]]) -> str:
+    scores = [float(d["score"]) for d in dimensions if isinstance(d.get("score"), int | float)]
+    if not scores:
+        return "-"
+    return f"{sum(scores) / len(scores):.1f}"
+
+
+def health_hints(result: dict[str, object], dimensions: list[dict[str, object]]) -> list[str]:
+    hints: list[str] = []
+    if result.get("memory_count") == 0:
+        hints.append("Cold start - will improve as memories are saved")
+    if any(d.get("name") == "scope_coverage" and d.get("score") == 0 for d in dimensions):
+        hints.append("Run from a repository with hooks installed, or add memories with --scope")
+    if result.get("schema_problems"):
+        hints.append("Run codex-memory schema-check for database repair details")
+    return hints
+
+
+def display_width(value: str) -> int:
+    return len(value) - sum(1 for char in value if ord(char) > 0xFFFF)
+
+
+def pad_display(value: str, width: int) -> str:
+    return value + " " * max(0, width - display_width(value))
+
+
 def main(argv: list[str] | None = None) -> None:
     started = time.monotonic()
     parser = argparse.ArgumentParser(prog="codex-memory")
@@ -366,6 +548,7 @@ def main(argv: list[str] | None = None) -> None:
     p.set_defaults(func=install)
 
     p = sub.add_parser("health")
+    p.add_argument("--json", action="store_true", help="Print the raw machine-readable health payload.")
     p.set_defaults(func=health)
 
     p = sub.add_parser("schema-check")
@@ -415,6 +598,12 @@ def main(argv: list[str] | None = None) -> None:
     p.add_argument("action", choices=["rebuild"])
     p.add_argument("--scope")
     p.set_defaults(func=embeddings)
+
+    p = sub.add_parser("doctor")
+    p.add_argument("--repo", help="Repository path to inspect. Defaults to the current working directory.")
+    p.add_argument("--scope", help="Memory scope to use for the optional roundtrip. Defaults to the repo root name.")
+    p.add_argument("--no-roundtrip", action="store_false", dest="roundtrip", help="Skip the write/search roundtrip probe.")
+    p.set_defaults(func=doctor, roundtrip=True)
 
     p = sub.add_parser("forget")
     p.add_argument("id", type=int)

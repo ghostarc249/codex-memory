@@ -14,6 +14,15 @@ from .store import MemoryStore
 MAX_CONTEXT_MEMORIES = 5
 MAX_CONTEXT_FILES = 10
 MAX_STORED_CONTENT_CHARS = 4000
+CONTINUATION_MARKERS = (
+    "continue",
+    "pick up",
+    "resume",
+    "carry on",
+    "where were we",
+    "context compression",
+    "compaction",
+)
 
 SECRET_PATTERNS = [
     re.compile(r"(?i)\b(api[_-]?key|token|secret|password|connection[_-]?string)\b\s*[:=]\s*['\"]?[^'\"\s]+"),
@@ -75,82 +84,96 @@ def resolve_git_root(cwd: str | None) -> Path | None:
 
 
 def user_prompt_submit() -> None:
-    payload = read_hook_input()
-    prompt = str(payload.get("prompt") or "").strip()
-    cwd = str(payload.get("cwd") or os.getcwd())
-    scope = resolve_scope(cwd)
+    try:
+        payload = read_hook_input()
+        prompt = str(payload.get("prompt") or "").strip()
+        cwd = str(payload.get("cwd") or os.getcwd())
+        scope = resolve_scope(cwd)
 
-    store = MemoryStore()
-    memories = store.search(prompt, scope=scope, limit=MAX_CONTEXT_MEMORIES) if prompt else []
-    if not memories:
-        memories = store.list(scope=scope, limit=min(MAX_CONTEXT_MEMORIES, 3))
-    files = store.list_files(scope=scope, limit=MAX_CONTEXT_FILES)
+        store = MemoryStore()
+        if is_continuation_prompt(prompt):
+            memories = continuation_memories(store, scope, prompt)
+        else:
+            memories = store.hybrid_search(prompt, scope=scope, limit=MAX_CONTEXT_MEMORIES) if prompt else []
+            if not memories:
+                memories = store.list(scope=scope, limit=min(MAX_CONTEXT_MEMORIES, 3))
+        files = store.list_files(scope=scope, limit=MAX_CONTEXT_FILES)
 
-    if not memories and not files:
-        write_json({"continue": True})
-        return
+        if not memories and not files:
+            write_json({"continue": True})
+            return
 
-    write_json(
-        {
-            "continue": True,
-            "hookSpecificOutput": {
-                "hookEventName": "UserPromptSubmit",
-                "additionalContext": format_memory_context(scope, memories, files),
-            },
-        }
-    )
+        write_json(
+            {
+                "continue": True,
+                "hookSpecificOutput": {
+                    "hookEventName": "UserPromptSubmit",
+                    "additionalContext": format_memory_context(scope, memories, files),
+                },
+            }
+        )
+    except Exception as exc:
+        write_json({"continue": True, "suppressOutput": True, "metadata": {"codex_memory_warning": str(exc)}})
 
 
 def post_tool_use() -> None:
-    payload = read_hook_input()
-    cwd = str(payload.get("cwd") or os.getcwd())
-    scope = resolve_scope(cwd)
-    tool_name = str(payload.get("tool_name") or "")
-    source = make_source(str(payload.get("session_id") or ""), str(payload.get("turn_id") or ""))
-    paths = extract_paths(payload)
+    try:
+        payload = read_hook_input()
+        cwd = str(payload.get("cwd") or os.getcwd())
+        scope = resolve_scope(cwd)
+        tool_name = str(payload.get("tool_name") or "")
+        source = make_source(str(payload.get("session_id") or ""), str(payload.get("turn_id") or ""))
+        paths = extract_paths(payload)
 
-    if paths:
-        store = MemoryStore()
-        for path in paths[:25]:
-            store.record_file(scope=scope, file_path=normalize_path(path, cwd), tool_name=tool_name, source=source)
+        if paths:
+            store = MemoryStore()
+            for path in paths[:25]:
+                store.record_file(scope=scope, file_path=normalize_path(path, cwd), tool_name=tool_name, source=source)
 
-    write_json({"continue": True})
+        write_json({"continue": True})
+    except Exception as exc:
+        write_json({"continue": True, "suppressOutput": True, "metadata": {"codex_memory_warning": str(exc)}})
 
 
 def stop() -> None:
-    payload = read_hook_input()
-    if payload.get("stop_hook_active"):
+    try:
+        payload = read_hook_input()
+        if payload.get("stop_hook_active"):
+            write_json({"continue": True})
+            return
+
+        assistant_message = str(payload.get("last_assistant_message") or "").strip()
+        if should_skip_memory_write(assistant_message):
+            write_json({"continue": True})
+            return
+
+        cwd = str(payload.get("cwd") or os.getcwd())
+        scope = resolve_scope(cwd)
+        session_id = str(payload.get("session_id") or "")
+        turn_id = str(payload.get("turn_id") or "")
+        source = make_source(session_id, turn_id)
+
+        store = MemoryStore()
+        if source and any(memory.get("source") == source for memory in store.list(scope=scope, limit=25)):
+            write_json({"continue": True})
+            return
+
+        files = store.list_files(scope=scope, limit=MAX_CONTEXT_FILES)
+        title = make_title(assistant_message)
+        content = make_checkpoint_content(assistant_message, files)
+
+        store.add(
+            scope=scope,
+            type_="task_context",
+            title=title,
+            content=content,
+            tags=["codex-hook", "auto-memory", "checkpoint"],
+            source=source,
+        )
+
         write_json({"continue": True})
-        return
-
-    assistant_message = str(payload.get("last_assistant_message") or "").strip()
-    if should_skip_memory_write(assistant_message):
-        write_json({"continue": True})
-        return
-
-    cwd = str(payload.get("cwd") or os.getcwd())
-    scope = resolve_scope(cwd)
-    session_id = str(payload.get("session_id") or "")
-    turn_id = str(payload.get("turn_id") or "")
-    title = make_title(assistant_message)
-    content = sanitize_for_storage(assistant_message[:MAX_STORED_CONTENT_CHARS])
-    source = make_source(session_id, turn_id)
-
-    store = MemoryStore()
-    if source and any(memory.get("source") == source for memory in store.list(scope=scope, limit=25)):
-        write_json({"continue": True})
-        return
-
-    store.add(
-        scope=scope,
-        type_="task_context",
-        title=title,
-        content=content,
-        tags=["codex-hook", "auto-memory"],
-        source=source,
-    )
-
-    write_json({"continue": True})
+    except Exception as exc:
+        write_json({"continue": True, "suppressOutput": True, "metadata": {"codex_memory_warning": str(exc)}})
 
 
 def format_memory_context(scope: str, memories: list[dict[str, Any]], files: list[dict[str, Any]]) -> str:
@@ -186,6 +209,46 @@ def should_skip_memory_write(message: str) -> bool:
         "what would you like",
     ]
     return any(marker in lowered for marker in noisy_markers)
+
+
+def is_continuation_prompt(prompt: str) -> bool:
+    lowered = prompt.lower()
+    return any(marker in lowered for marker in CONTINUATION_MARKERS)
+
+
+def continuation_memories(store: MemoryStore, scope: str, prompt: str) -> list[dict[str, Any]]:
+    memories: list[dict[str, Any]] = []
+    memories.extend(store.checkpoints(scope=scope, limit=MAX_CONTEXT_MEMORIES))
+    if prompt:
+        memories.extend(store.hybrid_search(prompt, scope=scope, limit=MAX_CONTEXT_MEMORIES))
+    seen: set[int] = set()
+    result: list[dict[str, Any]] = []
+    for memory in memories:
+        memory_id = int(memory["id"])
+        if memory_id in seen:
+            continue
+        seen.add(memory_id)
+        result.append(memory)
+        if len(result) >= MAX_CONTEXT_MEMORIES:
+            break
+    return result
+
+
+def make_checkpoint_content(assistant_message: str, files: list[dict[str, Any]]) -> str:
+    cleaned = sanitize_for_storage(assistant_message[:MAX_STORED_CONTENT_CHARS])
+    lines = [
+        "Checkpoint summary:",
+        f"- Outcome: {single_line(cleaned)}",
+    ]
+    if files:
+        lines.append("- Recent files:")
+        for file in files[:MAX_CONTEXT_FILES]:
+            lines.append(f"  - {file['file_path']}")
+    lines.extend([
+        "- Validation: Review the latest assistant message for commands/tests that were run.",
+        "- Next step: Continue from this checkpoint and verify drift-prone details in the repository.",
+    ])
+    return "\n".join(lines)
 
 
 def make_title(message: str) -> str:

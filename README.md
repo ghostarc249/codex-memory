@@ -4,7 +4,7 @@ A minimal, local-first Codex memory setup inspired by `auto-memory`, but designe
 
 - SQLite + FTS5 durable memory store
 - MCP stdio server exposing memory tools
-- CLI for `install`, `health`, `schema-check`, `add`, `search`, `list`, `show`, `files`, `checkpoints`, `embeddings`, `forget`, `hook`
+- CLI for `install`, `doctor`, `health`, `schema-check`, `add`, `search`, `list`, `show`, `files`, `checkpoints`, `embeddings`, `forget`, `hook`
 - Codex lifecycle hooks for automatic recall, touched-file tracking, and turn writeback
 - Optional Codex config snippets for `~/.codex/config.toml`
 - Optional project `AGENTS.md` policy block
@@ -49,8 +49,12 @@ Then:
 
 ```bash
 codex-memory install
+codex-memory doctor
 codex-memory health
 ```
+
+`codex-memory health` prints a terminal-friendly score table. Use
+`codex-memory health --json` when you need the raw machine-readable payload.
 
 Run `codex-memory install` from each repository where you want automatic memory.
 It updates the user Codex config so the MCP server is available, then writes
@@ -190,6 +194,7 @@ codex-memory search "business logic should not live in endpoints" --scope my-pro
 codex-memory files --scope my-project --limit 10 --days 7
 codex-memory checkpoints --scope my-project --limit 5
 codex-memory show 1
+codex-memory doctor
 codex-memory schema-check
 codex-memory embeddings rebuild --scope my-project
 ```
