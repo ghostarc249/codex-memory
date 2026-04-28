@@ -200,7 +200,7 @@ def run_mcp_server(store: MemoryStore) -> None:
                     "result": {
                         "protocolVersion": "2024-11-05",
                         "capabilities": {"tools": {}},
-                        "serverInfo": {"name": "codex-memory", "version": "0.1.0"}
+                        "serverInfo": {"name": "codex-memory", "version": "0.1.2"}
                     }
                 })
             elif method == "notifications/initialized":

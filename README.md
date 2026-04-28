@@ -171,8 +171,8 @@ This repo uses PyPI Trusted Publishing through GitHub Actions. Configure the
 Publish a release by pushing a signed version tag:
 
 ```bash
-git tag -s v0.1.0 -m "Release v0.1.0"
-git push origin v0.1.0
+git tag -s v0.1.2 -m "Release v0.1.2"
+git push origin v0.1.2
 ```
 
 The workflow builds the source distribution and wheel, then publishes them to
