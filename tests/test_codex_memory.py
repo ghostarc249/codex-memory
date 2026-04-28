@@ -6,6 +6,7 @@ import subprocess
 import sys
 import tempfile
 import unittest
+from unittest import mock
 from pathlib import Path
 
 from codex_memory import hooks
@@ -172,6 +173,18 @@ tool_timeout_sec = 30
         self.assertIn("memories = true", merged)
         self.assertIn("codex_hooks = true", merged)
 
+    def test_merge_codex_config_adds_memory_defaults_without_overwriting_user_threshold(self) -> None:
+        existing = """
+[codex_memory]
+min_semantic_context_score = 0.25
+""".lstrip()
+
+        merged = merge_codex_config(existing)
+
+        self.assertEqual(merged.count("[codex_memory]"), 1)
+        self.assertIn("min_semantic_context_score = 0.25", merged)
+        self.assertNotIn("min_semantic_context_score = 0.18", merged)
+
     def test_validate_project_hooks_requires_all_auto_memory_hooks(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             hooks_path = Path(tmp) / ".codex" / "hooks.json"
@@ -227,6 +240,27 @@ tool_timeout_sec = 30
 
             self.assertEqual(hooks.relevant_memories(store, "repo", "what time is it"), [])
             self.assertEqual(len(hooks.relevant_memories(store, "repo", "postgres dapper pgvector")), 1)
+
+    def test_semantic_threshold_can_be_configured_from_env(self) -> None:
+        with mock.patch.dict(os.environ, {hooks.MIN_SEMANTIC_CONTEXT_SCORE_ENV: "0.04"}, clear=False):
+            self.assertEqual(hooks.semantic_context_score_threshold(), 0.04)
+
+    def test_semantic_threshold_can_be_configured_from_codex_config(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            config = Path(tmp) / "config.toml"
+            config.write_text("[codex_memory]\nmin_semantic_context_score = 0.05\n", encoding="utf-8")
+
+            with mock.patch.dict(os.environ, {hooks.CONFIG_PATH_ENV: str(config)}, clear=False):
+                self.assertEqual(hooks.semantic_context_score_threshold(), 0.05)
+
+    def test_configured_lower_threshold_can_allow_weak_semantic_match(self) -> None:
+        memory = {"semantic_score": 0.05}
+
+        with mock.patch.dict(os.environ, {hooks.MIN_SEMANTIC_CONTEXT_SCORE_ENV: "0.04"}, clear=False):
+            self.assertTrue(hooks.is_relevant_memory(memory))
+
+        with mock.patch.dict(os.environ, {hooks.MIN_SEMANTIC_CONTEXT_SCORE_ENV: "0.06"}, clear=False):
+            self.assertFalse(hooks.is_relevant_memory(memory))
 
     def test_format_memory_context_has_total_budget(self) -> None:
         context = hooks.format_memory_context(

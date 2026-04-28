@@ -5,10 +5,11 @@ import os
 import re
 import subprocess
 import sys
+import tomllib
 from pathlib import Path
 from typing import Any
 
-from .store import MemoryStore
+from .store import MemoryStore, codex_home
 
 
 MAX_CONTEXT_MEMORIES = 4
@@ -17,6 +18,10 @@ MAX_CONTEXT_MEMORY_CHARS = 700
 MAX_TOTAL_CONTEXT_CHARS = 5000
 MAX_STORED_CONTENT_CHARS = 4000
 MIN_SEMANTIC_CONTEXT_SCORE = 0.18
+MIN_SEMANTIC_CONTEXT_SCORE_ENV = "CODEX_MEMORY_MIN_SEMANTIC_CONTEXT_SCORE"
+CONFIG_PATH_ENV = "CODEX_MEMORY_CONFIG"
+CONFIG_TABLE = "codex_memory"
+MIN_SEMANTIC_CONTEXT_SCORE_KEY = "min_semantic_context_score"
 CONTINUATION_MARKERS = (
     "continue",
     "pick up",
@@ -230,7 +235,39 @@ def relevant_memories(store: MemoryStore, scope: str, prompt: str) -> list[dict[
 def is_relevant_memory(memory: dict[str, Any]) -> bool:
     if "fts_rank" in memory:
         return True
-    return float(memory.get("semantic_score") or 0.0) >= MIN_SEMANTIC_CONTEXT_SCORE
+    return float(memory.get("semantic_score") or 0.0) >= semantic_context_score_threshold()
+
+
+def semantic_context_score_threshold() -> float:
+    env_value = os.environ.get(MIN_SEMANTIC_CONTEXT_SCORE_ENV)
+    if env_value:
+        return parse_threshold(env_value, MIN_SEMANTIC_CONTEXT_SCORE)
+
+    config_value = read_codex_memory_config().get(MIN_SEMANTIC_CONTEXT_SCORE_KEY)
+    if config_value is not None:
+        return parse_threshold(config_value, MIN_SEMANTIC_CONTEXT_SCORE)
+
+    return MIN_SEMANTIC_CONTEXT_SCORE
+
+
+def read_codex_memory_config() -> dict[str, Any]:
+    path = Path(os.environ.get(CONFIG_PATH_ENV) or codex_home() / "config.toml").expanduser()
+    try:
+        data = tomllib.loads(path.read_text(encoding="utf-8"))
+    except Exception:
+        return {}
+    value = data.get(CONFIG_TABLE)
+    return value if isinstance(value, dict) else {}
+
+
+def parse_threshold(value: object, default: float) -> float:
+    try:
+        threshold = float(value)
+    except (TypeError, ValueError):
+        return default
+    if threshold < 0.0 or threshold > 1.0:
+        return default
+    return threshold
 
 
 def continuation_memories(store: MemoryStore, scope: str, prompt: str) -> list[dict[str, Any]]:

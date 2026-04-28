@@ -79,6 +79,9 @@ Add this to `~/.codex/config.toml`:
 memories = true
 codex_hooks = true
 
+[codex_memory]
+min_semantic_context_score = 0.18
+
 [mcp_servers.codex_memory]
 command = "codex-memory"
 args = ["mcp"]
@@ -141,6 +144,23 @@ model starts work and injects matching memories plus recently touched files as
 extra developer context. The `PostToolUse` hook records files seen in Codex tool
 calls. The `Stop` hook stores the final assistant response as a `task_context`
 memory with `codex-hook` and `auto-memory` tags.
+
+Automatic recall is relevance-gated to avoid unnecessary context growth. The
+default semantic-only threshold is `0.18`; exact FTS matches are always allowed.
+Tune it in `~/.codex/config.toml`:
+
+```toml
+[codex_memory]
+min_semantic_context_score = 0.18
+```
+
+Lower values recall more aggressively and may add more prompt context. Higher
+values are stricter and save more tokens, but may miss weaker wording matches.
+For one-off testing, override it with:
+
+```bash
+export CODEX_MEMORY_MIN_SEMANTIC_CONTEXT_SCORE=0.12
+```
 
 The scope defaults to the git root directory name. Override it per environment:
 

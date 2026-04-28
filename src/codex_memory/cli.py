@@ -39,6 +39,10 @@ MCP_VALUES = {
     "tool_timeout_sec": "30",
 }
 
+CODEX_MEMORY_DEFAULTS = {
+    "min_semantic_context_score": str(hooks.MIN_SEMANTIC_CONTEXT_SCORE),
+}
+
 
 PROJECT_HOOKS = {
     "hooks": {
@@ -271,8 +275,29 @@ def install_project_hooks(path: Path) -> bool:
 def merge_codex_config(existing: str) -> str:
     text = remove_managed_block(existing)
     text = upsert_table_values(text, "features", FEATURE_VALUES, managed=False)
+    text = upsert_table_defaults(text, "codex_memory", CODEX_MEMORY_DEFAULTS)
     text = upsert_table_values(text, "mcp_servers.codex_memory", MCP_VALUES, managed=True)
     return text
+
+
+def upsert_table_defaults(text: str, table: str, defaults: dict[str, str]) -> str:
+    lines = text.splitlines()
+    header_index = find_table_header(lines, table)
+    if header_index is None:
+        block = format_table_block(table, defaults, managed=False)
+        prefix = "\n" if text.strip() else ""
+        return text.rstrip() + prefix + block + "\n"
+
+    end_index = find_table_end(lines, header_index)
+    section = lines[header_index + 1:end_index]
+    existing_keys = {key for line in section if (key := toml_key(line))}
+    new_section = list(section)
+    for key, value in defaults.items():
+        if key not in existing_keys:
+            new_section.append(f"{key} = {value}")
+
+    merged_lines = lines[:header_index + 1] + new_section + lines[end_index:]
+    return "\n".join(merged_lines).rstrip() + "\n"
 
 
 def remove_managed_block(text: str) -> str:
@@ -326,7 +351,7 @@ def format_table_block(table: str, values: dict[str, str], managed: bool) -> str
     lines.extend(f"{key} = {value}" for key, value in values.items())
     if managed:
         lines.append("# --- codex-memory end ---")
-    return "\n".join(lines)
+    return "\n" + "\n".join(lines)
 
 
 def find_table_header(lines: list[str], table: str) -> int | None:
