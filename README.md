@@ -190,6 +190,157 @@ codex-memory install --no-project-hooks
 
 Project-local hooks only run when Codex trusts the project `.codex/` layer.
 
+## CLI Reference
+
+### `install`
+
+Configures Codex Memory for a repository. By default it updates
+`~/.codex/config.toml` and writes `.codex/hooks.json` in the current git repo.
+
+Useful options:
+
+- `--repo /path/to/repo`: install hooks into a specific repository.
+- `--no-global-config`: skip changes to `~/.codex/config.toml`.
+- `--no-project-hooks`: skip writing `.codex/hooks.json`.
+
+### `doctor`
+
+Runs an end-to-end installation check. It verifies the merged Codex config,
+project hooks, database health, and a write/search roundtrip.
+
+Useful options:
+
+- `--repo /path/to/repo`: inspect a specific repository.
+- `--scope my-project`: use a specific memory scope for the roundtrip.
+- `--no-roundtrip`: skip the database write/search probe.
+
+### `health`
+
+Shows a terminal-friendly health report for the local memory database, including
+schema status, corpus size, embedding coverage, and scope coverage.
+
+Use `--json` when you want the raw machine-readable payload:
+
+```bash
+codex-memory health --json
+```
+
+### `schema-check`
+
+Checks that the SQLite database has the expected tables, columns, metadata, and
+embedding rows. It exits with a non-zero status if schema problems are found.
+
+### `add`
+
+Stores a memory record.
+
+Required fields:
+
+- `--scope`: project or repository scope.
+- `--type`: one of `decision`, `constraint`, `pattern`, `task_context`,
+  `pitfall`, or `note`.
+- `--title`: short label for the memory.
+- `--content`: the durable context to remember.
+
+Optional fields:
+
+- `--tags`: zero or more tags used for filtering and display.
+- `--source`: optional origin identifier, useful for generated checkpoints.
+
+### `search`
+
+Searches memories. The default mode is `hybrid`, which combines FTS5 exact
+matching with local semantic matching.
+
+Useful options:
+
+- `--scope my-project`: restrict results to one scope.
+- `--limit 5`: limit result count.
+- `--days 7`: only search recently updated memories.
+- `--mode fts`: exact/project-term search.
+- `--mode semantic`: wording-drift search.
+- `--mode hybrid`: combined search.
+
+### `list`
+
+Lists recent memories, newest first.
+
+Useful options:
+
+- `--scope my-project`: restrict to one scope.
+- `--limit 20`: limit result count.
+- `--days 30`: only show recently updated memories.
+- `--type decision`: filter by memory type.
+
+### `show`
+
+Displays one memory by numeric id:
+
+```bash
+codex-memory show 12
+```
+
+### `files`
+
+Lists recently touched files tracked by the `PostToolUse` hook. This helps Codex
+resume work with awareness of files that were recently read or edited.
+
+Useful options:
+
+- `--scope my-project`
+- `--limit 10`
+- `--days 7`
+
+### `checkpoints`
+
+Lists `task_context` memories written by the `Stop` hook. These are compact
+continuation notes from previous Codex turns.
+
+Useful options:
+
+- `--scope my-project`
+- `--limit 5`
+- `--days 7`
+
+### `embeddings`
+
+Maintains local semantic-search vectors. Currently the supported action is:
+
+```bash
+codex-memory embeddings rebuild --scope my-project
+```
+
+Use this after changing embedding behavior or when `schema-check` reports
+missing embedding rows.
+
+### `forget`
+
+Deletes a memory by numeric id:
+
+```bash
+codex-memory forget 12
+```
+
+Use this for stale, wrong, or overly noisy memories.
+
+### `hook`
+
+Runs a Codex lifecycle hook command. You usually do not call this manually;
+`codex-memory install` wires it into `.codex/hooks.json`.
+
+Supported hook events:
+
+- `user-prompt-submit`: searches memory before a prompt reaches the model.
+- `post-tool-use`: records touched files after Codex tool calls.
+- `stop`: writes a compact checkpoint after a Codex turn.
+
+Manual hook checks are useful when tuning recall:
+
+```bash
+printf '{"cwd":"%s","prompt":"postgres persistence"}' "$PWD" \
+  | codex-memory hook user-prompt-submit
+```
+
 ## Project Policy
 
 You can add a policy block to your repo `AGENTS.md` so future Codex sessions know
