@@ -11,9 +11,12 @@ from typing import Any
 from .store import MemoryStore
 
 
-MAX_CONTEXT_MEMORIES = 5
-MAX_CONTEXT_FILES = 10
+MAX_CONTEXT_MEMORIES = 4
+MAX_CONTEXT_FILES = 5
+MAX_CONTEXT_MEMORY_CHARS = 700
+MAX_TOTAL_CONTEXT_CHARS = 5000
 MAX_STORED_CONTENT_CHARS = 4000
+MIN_SEMANTIC_CONTEXT_SCORE = 0.18
 CONTINUATION_MARKERS = (
     "continue",
     "pick up",
@@ -91,13 +94,12 @@ def user_prompt_submit() -> None:
         scope = resolve_scope(cwd)
 
         store = MemoryStore()
-        if is_continuation_prompt(prompt):
+        continuation_prompt = is_continuation_prompt(prompt)
+        if continuation_prompt:
             memories = continuation_memories(store, scope, prompt)
         else:
-            memories = store.hybrid_search(prompt, scope=scope, limit=MAX_CONTEXT_MEMORIES) if prompt else []
-            if not memories:
-                memories = store.list(scope=scope, limit=min(MAX_CONTEXT_MEMORIES, 3))
-        files = store.list_files(scope=scope, limit=MAX_CONTEXT_FILES)
+            memories = relevant_memories(store, scope, prompt)
+        files = store.list_files(scope=scope, limit=MAX_CONTEXT_FILES) if continuation_prompt or memories else []
 
         if not memories and not files:
             write_json({"continue": True})
@@ -194,8 +196,9 @@ def format_memory_context(scope: str, memories: list[dict[str, Any]], files: lis
         tags = ", ".join(memory.get("tags") or [])
         tag_text = f" tags={tags}" if tags else ""
         lines.append(f"- [{memory['type']}] {memory['title']} (id={memory['id']}{tag_text})")
-        lines.append(f"  {single_line(sanitize_terminal(str(memory['content'])))}")
-    return "\n".join(lines)
+        content = single_line(sanitize_terminal(str(memory['content'])))
+        lines.append(f"  {truncate_text(content, MAX_CONTEXT_MEMORY_CHARS)}")
+    return truncate_lines(lines, MAX_TOTAL_CONTEXT_CHARS)
 
 
 def should_skip_memory_write(message: str) -> bool:
@@ -214,6 +217,20 @@ def should_skip_memory_write(message: str) -> bool:
 def is_continuation_prompt(prompt: str) -> bool:
     lowered = prompt.lower()
     return any(marker in lowered for marker in CONTINUATION_MARKERS)
+
+
+def relevant_memories(store: MemoryStore, scope: str, prompt: str) -> list[dict[str, Any]]:
+    prompt = prompt.strip()
+    if not prompt:
+        return []
+    memories = store.hybrid_search(prompt, scope=scope, limit=MAX_CONTEXT_MEMORIES)
+    return [memory for memory in memories if is_relevant_memory(memory)][:MAX_CONTEXT_MEMORIES]
+
+
+def is_relevant_memory(memory: dict[str, Any]) -> bool:
+    if "fts_rank" in memory:
+        return True
+    return float(memory.get("semantic_score") or 0.0) >= MIN_SEMANTIC_CONTEXT_SCORE
 
 
 def continuation_memories(store: MemoryStore, scope: str, prompt: str) -> list[dict[str, Any]]:
@@ -259,6 +276,30 @@ def make_title(message: str) -> str:
 
 def single_line(value: str) -> str:
     return re.sub(r"\s+", " ", value).strip()
+
+
+def truncate_text(value: str, max_chars: int) -> str:
+    if len(value) <= max_chars:
+        return value
+    return value[: max(0, max_chars - 3)].rstrip() + "..."
+
+
+def truncate_lines(lines: list[str], max_chars: int) -> str:
+    output: list[str] = []
+    used = 0
+    marker = "[Codex Memory context truncated]"
+    for line in lines:
+        line_cost = len(line) + (1 if output else 0)
+        if used + line_cost > max_chars:
+            marker_cost = len(marker) + (1 if output else 0)
+            if used + marker_cost <= max_chars:
+                output.append(marker)
+            elif output:
+                output[-1] = truncate_text(output[-1], max(0, len(output[-1]) - (used + marker_cost - max_chars)))
+            break
+        output.append(line)
+        used += line_cost
+    return "\n".join(output)
 
 
 def redact_sensitive(value: str) -> str:

@@ -161,6 +161,39 @@ tool_timeout_sec = 30
 
             self.assertEqual(memories[0]["id"], checkpoint["id"])
 
+    def test_relevant_memories_filters_weak_semantic_matches(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            store = MemoryStore(Path(tmp) / "memory.db")
+            store.add(
+                scope="repo",
+                type_="decision",
+                title="Use Postgres",
+                content="Use PostgreSQL with Dapper and pgvector for persistence.",
+                tags=["database"],
+            )
+
+            self.assertEqual(hooks.relevant_memories(store, "repo", "what time is it"), [])
+            self.assertEqual(len(hooks.relevant_memories(store, "repo", "postgres dapper pgvector")), 1)
+
+    def test_format_memory_context_has_total_budget(self) -> None:
+        context = hooks.format_memory_context(
+            "repo",
+            [
+                {
+                    "id": index,
+                    "type": "task_context",
+                    "title": f"Large memory {index}",
+                    "content": "word " * 1000,
+                    "tags": ["checkpoint"],
+                }
+                for index in range(20)
+            ],
+            [{"file_path": f"src/file_{index}.py", "tool_name": "read", "seen_count": index} for index in range(20)],
+        )
+
+        self.assertLessEqual(len(context), hooks.MAX_TOTAL_CONTEXT_CHARS)
+        self.assertIn("Codex Memory auto-search", context)
+
     def test_retry_retries_locked_operations(self) -> None:
         attempts = {"count": 0}
 
@@ -251,6 +284,35 @@ class HookCliTests(unittest.TestCase):
             output = json.loads(result.stdout)
             context = output["hookSpecificOutput"]["additionalContext"]
             self.assertIn("src/app.py", context)
+
+    def test_user_prompt_submit_does_not_inject_unrelated_recent_memory(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            db_path = Path(tmp) / "memory.db"
+            repo = Path(tmp) / "repo"
+            repo.mkdir()
+            store = MemoryStore(db_path)
+            store.add(
+                scope="repo",
+                type_="decision",
+                title="Use Postgres",
+                content="Use PostgreSQL with Dapper and pgvector for persistence.",
+                tags=["database"],
+            )
+            env = os.environ.copy()
+            env["PYTHONPATH"] = "src"
+            env["CODEX_MEMORY_DB"] = str(db_path)
+
+            result = subprocess.run(
+                [sys.executable, "-m", "codex_memory.cli", "hook", "user-prompt-submit"],
+                cwd=Path(__file__).resolve().parents[1],
+                env=env,
+                input=json.dumps({"hook_event_name": "UserPromptSubmit", "cwd": str(repo), "prompt": "what time is it"}),
+                text=True,
+                check=True,
+                capture_output=True,
+            )
+
+            self.assertEqual(json.loads(result.stdout), {"continue": True})
 
     def test_stop_hook_writes_structured_checkpoint(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
